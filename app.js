@@ -9,6 +9,7 @@ const useUIStore = create(set => ({
   selectedStoryForView: null,
   isLoadingGlobal: false, // For major operations like starting/finishing story
   isLoadingPageGeneration: false, // For LLM/image generation
+  activeStoryIdFromRoom: null, // Initialize activeStoryIdFromRoom
   setViewMode: (mode) => set({ viewMode: mode }),
   setSelectedStoryForView: (story) => set({ selectedStoryForView: story }),
   setIsLoadingGlobal: (loading) => set({ isLoadingGlobal: loading }),
@@ -265,6 +266,8 @@ function StoryWorkspace({ activeStoryId, activeStoryPages }) {
 
 function StoryGallery() {
   const { setViewMode, setSelectedStoryForView, setIsLoadingGlobal } = useUIStore();
+  const activeStoryIdFromStore = useUIStore(state => state.activeStoryIdFromRoom); // Subscribe to activeStoryIdFromRoom
+
   const { data: storiesData, loading: storiesLoading } = useQuery(
     room.collection('stories').filter({ status: 'finished' }) // Or query all and filter client-side if status filter not robust
   );
@@ -352,9 +355,9 @@ function StoryGallery() {
         <button onClick={handleStartNewStory} className="button button-primary mr-2">
           Start New Story
         </button>
-         <button onClick={() => useUIStore.getState().activeStoryIdFromRoom && setViewMode('story')} 
+         <button onClick={() => activeStoryIdFromStore && setViewMode('story')} 
             className="button button-secondary"
-            disabled={!useUIStore.getState().activeStoryIdFromRoom} // Enable if an active story exists
+            disabled={!activeStoryIdFromStore} 
         >
           Back to Active Story
         </button>
@@ -441,54 +444,62 @@ function App() {
   const [activeStoryPagesFromRoom, setActiveStoryPagesFromRoom] = useState({});
 
   useEffect(() => {
-    const initRoom = async () => {
-      await room.initialize();
-      
-      // Initial state from room
-      setActiveStoryIdFromRoom(room.roomState?.activeStoryId || null);
-      setActiveStoryPagesFromRoom(room.roomState?.activeStoryPages || {});
-      
-      if (room.roomState?.activeStoryId) {
-        setViewMode('story');
-      } else {
-        setViewMode('gallery');
-      }
+    let unsubscribeRoomState = () => {}; // Ensure it's always a function
 
-      // Subscribe to room state changes
-      const unsubscribeRoomState = room.subscribeRoomState((newState) => {
-        setActiveStoryIdFromRoom(newState?.activeStoryId || null);
-        setActiveStoryPagesFromRoom(newState?.activeStoryPages || {});
+    const initApp = async () => {
+      try {
+        await room.initialize();
+      
+        // Initial state sync from room to local React state and Zustand store
+        const initialActiveId = room.roomState?.activeStoryId || null;
+        const initialActivePages = room.roomState?.activeStoryPages || {};
         
-        // Logic to switch views based on active story presence
-        if (newState?.activeStoryId && viewMode !== 'story' && viewMode !== 'loading') {
-            // if we are in gallery and a story becomes active (e.g. another user started/continued)
-            // we might want to offer to join, or automatically switch. For now, let user navigate.
-        } else if (!newState?.activeStoryId && viewMode === 'story') {
-            // If active story ends while viewing it
-            setViewMode('gallery');
+        setActiveStoryIdFromRoom(initialActiveId); // For StoryWorkspace prop
+        setActiveStoryPagesFromRoom(initialActivePages); // For StoryWorkspace prop
+        useUIStore.setState({ activeStoryIdFromRoom: initialActiveId }); // For Gallery and other potential consumers
+        
+        // Determine initial view mode
+        if (initialActiveId) {
+          setViewMode('story');
+        } else {
+          setViewMode('gallery');
         }
-      });
-      
-      // Store activeStoryIdFromRoom in Zustand store so Gallery can access it for 'Back to Active Story' button
-      useUIStore.setState({ activeStoryIdFromRoom: room.roomState?.activeStoryId || null });
-      room.subscribeRoomState(newState => {
-        useUIStore.setState({ activeStoryIdFromRoom: newState?.activeStoryId || null });
-      });
 
+        // Single subscription to room state changes
+        unsubscribeRoomState = room.subscribeRoomState((newState) => {
+          const newActiveId = newState?.activeStoryId || null;
+          const newActivePages = newState?.activeStoryPages || {};
 
-      return () => {
-        unsubscribeRoomState();
-      };
+          // Update local React state (for StoryWorkspace)
+          setActiveStoryIdFromRoom(newActiveId);
+          setActiveStoryPagesFromRoom(newActivePages);
+
+          // Update Zustand store (for Gallery etc.)
+          useUIStore.setState({ activeStoryIdFromRoom: newActiveId });
+          
+          // View mode logic based on story status
+          const currentViewMode = useUIStore.getState().viewMode; // Get current viewMode
+          if (!newActiveId && currentViewMode === 'story') {
+              // If active story ends (becomes null) AND user is currently in 'story' view
+              setViewMode('gallery');
+          }
+        });
+      } catch (error) {
+        console.error("Error during app initialization:", error);
+        // Potentially set an error state in UIStore to show a global error message
+        setViewMode('gallery'); // Fallback view
+      }
     };
 
-    initRoom();
-  }, []); // Run only once on mount
-  
-  // Update Zustand store when activeStoryIdFromRoom changes (from room subscription)
-  useEffect(() => {
-    useUIStore.setState({ activeStoryIdFromRoom: activeStoryIdFromRoom });
-  }, [activeStoryIdFromRoom]);
+    initApp();
 
+    return () => {
+      unsubscribeRoomState(); // Cleanup subscription on component unmount
+    };
+  }, [setViewMode]); // setViewMode is from Zustand and is stable. Effect runs once on mount.
+  
+  // The useEffect that previously synced local activeStoryIdFromRoom to Zustand is no longer needed
+  // as Zustand is updated directly in the room.subscribeRoomState callback.
 
   if (viewMode === 'loading' || isLoadingGlobal) {
     return (
@@ -510,4 +521,3 @@ function App() {
 
 const root = createRoot(document.getElementById('root'));
 root.render(<App />);
-
